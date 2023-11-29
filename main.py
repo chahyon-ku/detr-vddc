@@ -16,6 +16,10 @@ from datasets import build_dataset, get_coco_api_from_dataset
 from engine import evaluate, train_one_epoch
 from models import build_model
 
+# KU: Added SetCriterion
+from models.detr import SetCriterion
+from models.matcher import build_matcher
+
 
 def get_args_parser():
     parser = argparse.ArgumentParser('Set transformer detector', add_help=False)
@@ -103,6 +107,12 @@ def get_args_parser():
 
 
 def main(args):
+    # KU: Added wandb tracking
+    import wandb
+    wandb.login()
+    wandb.init(project='detr-yolov8-vddc')
+    wandb.config.update(args)
+
     utils.init_distributed_mode(args)
     print("git:\n  {}\n".format(utils.get_sha()))
 
@@ -181,6 +191,17 @@ def main(args):
             lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
             args.start_epoch = checkpoint['epoch'] + 1
 
+    # KU: Changed num_classes = 2 (0: diver, 1: no-diver)
+    model_without_ddp.class_embed = torch.nn.Linear(256, 2)
+    matcher = build_matcher(args)
+    weight_dict = {'loss_ce': 1, 'loss_bbox': args.bbox_loss_coef}
+    weight_dict['loss_giou'] = args.giou_loss_coef
+    losses = ['labels', 'boxes', 'cardinality']
+    criterion = SetCriterion(1, matcher=matcher, weight_dict=weight_dict,
+                             eos_coef=args.eos_coef, losses=losses)
+    criterion.to(device)
+    model_without_ddp.to(device)
+
     if args.eval:
         test_stats, coco_evaluator = evaluate(model, criterion, postprocessors,
                                               data_loader_val, base_ds, device, args.output_dir)
@@ -219,6 +240,9 @@ def main(args):
                      **{f'test_{k}': v for k, v in test_stats.items()},
                      'epoch': epoch,
                      'n_parameters': n_parameters}
+
+        # KU: Added wandb tracking
+        wandb.log(log_stats)
 
         if args.output_dir and utils.is_main_process():
             with (output_dir / "log.txt").open("a") as f:
